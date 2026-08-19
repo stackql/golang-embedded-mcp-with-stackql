@@ -1,0 +1,10 @@
+# Binaries
+/bin/
+*.exe
+
+# Fetched server binaries + generated go:embed glue for cmd/vendored
+# (go generate ./cmd/vendored re-creates them)
+cmd/vendored/stackql-mcp-*
+cmd/vendored/stackql_mcp_*_gen.go
+
+.env

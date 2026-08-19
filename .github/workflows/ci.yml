@@ -1,0 +1,57 @@
+# Build and smoke everything against the published stackql-mcp-go module.
+# Everything except 'agent-live' needs zero credentials (github null_auth).
+# 'agent-live' runs one real one-shot copilot prompt and only when the
+# ANTHROPIC_API_KEY secret is configured.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - run: test -z "$(gofmt -l .)"
+      - name: vendored glue (go generate fetches + pin-verifies the bundle)
+        run: go generate ./cmd/vendored
+      - run: go vet ./...
+      - run: go build ./...
+      - name: minimal (sidecar download, tools, one SELECT, refused write)
+        run: go run ./cmd/minimal
+      - name: vendored (no network at run time)
+        run: go run ./cmd/vendored
+      - name: copilot preflight (no model call)
+        run: go run ./cmd/copilot --check
+      - name: sandboxctl tools (zero credentials)
+        run: go run ./cmd/sandboxctl tools
+
+  agent-live:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - name: one-shot copilot prompt (skips without ANTHROPIC_API_KEY)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY not configured - skipping the live agent run"
+            exit 0
+          fi
+          go run ./cmd/copilot -p "How many public repos does the stackql org have? Answer with the number and the SQL you ran."

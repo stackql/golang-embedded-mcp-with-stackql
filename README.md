@@ -1,66 +1,109 @@
-# Go-native agentic cloud operations with embedded MCP
+# Golang-native agentic platform engineering with embedded MCP
 
-Working demonstrations of building agentic applications in Go on an embedded [StackQL](https://stackql.io) MCP server.
+Demo code for a demonstration of Golang-native agentic platform engineering with embedded MCP.
 
-The idea in one paragraph: StackQL treats cloud and SaaS providers as data sources accessed via SQL. Agents doing platform engineering, SRE and audit work need to query, reason about and act on actual running state, not on state files. The StackQL MCP server is the agent interface to that engine, with a small fixed tool surface and safety modes gating writes. The [`stackql-mcp-go`](https://pkg.go.dev/github.com/stackql/stackql-mcp-go/embed) module embeds that server in a Go application - sidecar (downloaded and sha256-verified on first run) or vendored straight into the binary with `go:generate` + `go:embed` - and hands you a connected [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) client. Wire those tools into a Claude agent loop ([anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go)) and every action the agent takes is a readable SQL statement.
+[StackQL](https://github.com/stackql/stackql) treats cloud and SaaS providers as data sources accessed via SQL. Agents doing platform engineering, SRE and audit work need to query, reason about and act on actual running state, not on state files. The StackQL MCP server is the agent interface to that engine, with a small fixed tool surface and safety modes gating writes.
 
-## The programs
+The [`stackql-mcp-go`](https://pkg.go.dev/github.com/stackql/stackql-mcp-go/embed) module embeds that server in a Go application, either as a sidecar (downloaded and sha256-verified at first run) or vendored straight into the Go application with `go generate` + `go:embed` (one self-contained binary, no network at run time), and hands you a connected [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) client. The worked examples are three small agents with the same four parts, model, prompts, context and MCP tools, on one shared [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) agent loop: a repository governance audit over GitHub (zero credentials, server as a sidecar), an SRE assurance sweep over a service's footprint in AWS and Cloudflare (sidecar), and a FinOps report from Cost Explorer (server vendored into the binary). Every action an agent takes is a readable SQL statement.
 
-| Program | What it shows | Needs |
-|---|---|---|
-| [cmd/minimal](cmd/minimal/) | The smallest embedding: `StartServer`, `ModeReadOnly`, github `null_auth`, list tools, one `run_select_query`, one refused `run_mutation_query`. | Go 1.25+; no credentials |
-| [cmd/vendored](cmd/vendored/) | The same program with the server compiled in: `go generate` fetches the pin-verified bundle once, `go:embed` carries it - one self-contained binary, no network at run time. | Go 1.25+; no credentials |
-| [cmd/copilot](cmd/copilot/) | The agent. MCP tools -> a Claude agent loop. Ask questions about your estate in English; every answer shows the SQL it ran (tool-call trace on stderr). `--check` preflights without a model call; `-p` is one-shot; otherwise REPL. | `ANTHROPIC_API_KEY` |
-| [cmd/sandboxctl](cmd/sandboxctl/) | The reference app: an on-demand infrastructure concierge. Plans and prices in `read_only`, provisions in `safe` behind an explicit approval gate, labels everything with an expiry, and `reap` tears expired sandboxes down in `delete_safe`. Mode escalation as a workflow. | `ANTHROPIC_API_KEY` + `GOOGLE_CREDENTIALS` (`tools` subcommand needs neither) |
+## Demo phases
 
-## Quick start
+| Phase | Directory | What it shows | Needs |
+|---|---|---|---|
+| 1 | [primer/](primer/) | StackQL itself: `stackql shell`, `stackql exec`, `stackql srv` with `psql` and a Go app over the Postgres wire protocol (pgx) | `stackql` on PATH; AWS + Cloudflare for most blocks, none for the GitHub ones and the Go app |
+| 2 | [stacks/](stacks/) | `stackql-deploy`: a service's footprint across AWS and Cloudflare converged as data, a drift script, and a zero-credential GitHub variant | `stackql-deploy` on PATH; AWS + Cloudflare (or a GitHub token) |
+| 3 | [embedded/](embedded/) | Embedded MCP in Go: the smallest sidecar and vendored embeddings, three agents, and the reference app | Go 1.25+; `ANTHROPIC_API_KEY` for the agents |
+
+Phase 3, the programs (the suffix is how the server arrives):
+
+| Program | Server | What it does | Needs |
+|---|---|---|---|
+| `minimal-sidecar` | sidecar | `StartServer`, `ModeReadOnly`, github `null_auth`, list tools, one `run_select_query`, one refused `run_mutation_query` | nothing |
+| `minimal-vendored` | vendored | the same program with the server compiled in: `go generate` once, then no network at run time | nothing |
+| `audit-agent-sidecar` | sidecar | golden-path audit of a GitHub org and repo: licenses, topics, labels, branch protection; `--repl` for questions in turn | `ANTHROPIC_API_KEY` |
+| `sre-agent-sidecar` | sidecar | the morning assurance sweep over the service footprint: health, exposure, edge, governance | `ANTHROPIC_API_KEY`, `AWS_*`, `CLOUDFLARE_*`, `DEMO_*` |
+| `finops-agent-vendored` | vendored | the month-to-date FinOps report: spend by service from Cost Explorer, tagging gaps, waste | `ANTHROPIC_API_KEY`, `AWS_*` |
+| `sandboxctl-vendored` | vendored | the reference app: plans and prices in `read_only`, provisions in `safe` behind an approval gate, `reap` tears down in `delete_safe` | `ANTHROPIC_API_KEY`, `GOOGLE_CREDENTIALS` (`tools` needs neither) |
+
+## Demo Runbook
+
+### Prep
 
 ```sh
-git clone https://github.com/stackql/golang-embedded-mcp-with-stackql
-cd golang-embedded-mcp-with-stackql
-
-go run ./cmd/minimal                        # smallest embedding, zero credentials
-go run ./cmd/copilot --check                # agent preflight, zero credentials
-go run ./cmd/sandboxctl tools               # reference app's tool listing, zero credentials
-
-go generate ./cmd/vendored                  # fetch + verify the bundle (build time, once)
-go run ./cmd/vendored                       # then no network at run time
-
-export ANTHROPIC_API_KEY=sk-ant-...         # then the agent for real:
-go run ./cmd/copilot -p "which stackql org repos have no license? show the SQL"
-go run ./cmd/copilot                        # REPL
-
-# the full concierge (also needs GOOGLE_CREDENTIALS):
-go run ./cmd/sandboxctl request "a small linux vm and a bucket in sydney for 2 days" --project my-project
-go run ./cmd/sandboxctl reap --project my-project
+# cp .env.example .env            # fill in AWS_*, CLOUDFLARE_*, DEMO_*, ANTHROPIC_API_KEY
+set -a; . ./.env; set +a
+for p in aws awscc cloudflare github; do stackql exec "REGISTRY PULL $p"; done
+go generate ./embedded/minimal-vendored ./embedded/finops-agent-vendored ./embedded/sandboxctl-vendored   # network: fetches the pinned bundle
+go build ./...
+go run ./embedded/minimal-sidecar                 # caches the sidecar server bundle (v0.11.669)
+go run ./embedded/sre-agent-sidecar --check
+go run ./embedded/finops-agent-vendored --check
+stackql-deploy build stacks/service-footprint dev --env-file .env    # the footprint the shell join and the SRE sweep read; about 30 s
 ```
 
-First run of a sidecar program downloads the platform's server bundle from `releases.stackql.io`, verifies it against the sha256 pins shipped in the module, and caches the binary under `~/.stackql/mcp-server-bin/<version>/<platform>/`. Later runs are offline.
+### `stackql` Usage
 
-## Why this shape
+`shell` examples:
 
-- The agent's tools are the StackQL MCP tools, so what the agent decides to do is always a readable SQL statement. The tool-call trace is the audit trail.
-- Safety is a server-side contract: modes gate writes however the model is prompted. `copilot` stays `read_only`; `sandboxctl` escalates deliberately - plan in `read_only`, provision in `safe`, tear down in `delete_safe` - with a human approval between phases.
-- The github provider's `null_auth` mode means `minimal`, `vendored`, `copilot --check` and `sandboxctl tools` run with zero credentials. Real provider credentials in the environment unlock the same programs against AWS/Azure/Google/Databricks.
-- Vendored (`go:generate` + `go:embed`) is the single-binary story: `sandboxctl`-style tools ship as one file that starts with no network.
+```sh
+stackql shell                    # paste 1.2 (discovery) and 1.13 (the cross-provider JOIN) from primer/shell.iql; 1.12 if there is time
+```
+
+`exec` examples:
+
+```sh
+stackql exec --output json "SELECT name, status, JSON_EXTRACT(plan, '$.name') AS plan FROM cloudflare.zones.zones" | jq .
+stackql exec -i primer/queries/finops.iql --iqldata primer/queries/vars.jsonnet --var month=$(date +%Y-%m) --output csv
+```
+
+`srv` examples using the `stackql` engine over the Postgres wire protocol, from psql and from Go.
+
+```sh
+stackql srv --pgsrv.port 5466    # in a second terminal
+psql -h localhost -p 5466 -U stackql -d stackql -c "SELECT instance_id, instance_type, JSON_EXTRACT(state, '$.name') AS state, public_ip_address AS ip FROM aws.ec2.instances WHERE region = '$AWS_REGION'"
+# show primer/pgwire-go-app/main.go (pgx, simple query protocol, public GitHub data), then run it
+go run ./primer/pgwire-go-app
+```
+
+### MCP/SRE Examples
+
+Break something (slide THE AGENT LOOP): someone changed it in the console. Each statement is printed before it runs.
+
+```sh
+stacks/service-footprint/drift.sh tag ssh edge   # drops the owner tag, opens port 22 to the world, deletes the A record
+```
+
+The agents, one sidecar and one vendored (slides SIDECAR DETAILED, VENDORED DETAILED, THE DEMOS).
+
+```sh
+ls ~/.stackql/mcp-server-bin/0.11.669/            # the sidecar server, downloaded and sha256-verified at first run
+go run ./embedded/sre-agent-sidecar               # the sweep: one PASS, three ATTENTION, fixing SQL shown, not run
+go build -o /tmp/finops-agent-vendored ./embedded/finops-agent-vendored && ls -lh /tmp/finops-agent-vendored   # one file, engine inside
+/tmp/finops-agent-vendored                        # month-to-date spend, tagging gaps, waste; no download at run time
+```
+
+### Revert or Teardown
+
+```sh
+stackql-deploy build stacks/service-footprint dev --env-file .env      # converge, if you want to run the sweep again
+stackql-deploy teardown stacks/service-footprint dev --env-file .env
+```
 
 ## Versioning
 
-`stackql-mcp-go` is version-locked to the stackql release it embeds; the module tag is `v<stackql version>` (this repo pins `v0.10.605`; pin the minor and a server bump is a normal `go get -u`). Module source lives in [stackql/stackql `packaging/mcpb/go`](https://github.com/stackql/stackql/tree/main/packaging/mcpb/go) and is published through the [stackql/stackql-mcp-go](https://github.com/stackql/stackql-mcp-go) mirror.
-
-## Model
-
-The agents default to `claude-sonnet-5`; override with `--model`, `COPILOT_MODEL` (copilot) or `ANTHROPIC_MODEL` (sandboxctl).
+`stackql-mcp-go` is version-locked to the stackql release it embeds; the module tag is `v<stackql version>` (this repo pins `v0.11.669`; a server bump is a normal `go get github.com/stackql/stackql-mcp-go@v<new>`). Module source lives in [stackql/stackql `packaging/mcpb/go`](https://github.com/stackql/stackql/tree/main/packaging/mcpb/go) and is published through the [stackql/stackql-mcp-go](https://github.com/stackql/stackql-mcp-go) mirror.
 
 ## CI
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) builds everything, runs the zero-credential smokes (`minimal`, vendored generate+run, `copilot --check`, `sandboxctl tools`) on every push and PR. When the `ANTHROPIC_API_KEY` repo secret is configured, an `agent-live` job additionally runs one real one-shot `copilot` prompt.
+[.github/workflows/ci.yml](.github/workflows/ci.yml) generates the vendored glue, builds everything and runs the zero-credential smokes (both minimal programs, the three `--check` preflights, `sandboxctl-vendored tools`) on every push and PR. When the `ANTHROPIC_API_KEY` secret is configured, an `agent-live` job additionally asks `audit-agent-sidecar` one question.
 
 ## References
 
 - Module and docs: [pkg.go.dev/github.com/stackql/stackql-mcp-go/embed](https://pkg.go.dev/github.com/stackql/stackql-mcp-go/embed); source in [stackql/stackql `packaging/mcpb/go`](https://github.com/stackql/stackql/tree/main/packaging/mcpb/go)
 - StackQL MCP server: [stackql.io/docs/mcp](https://stackql.io/docs/mcp)
+- stackql-deploy: [stackql-deploy.io](https://stackql-deploy.io), [stackql/stackql-deploy-rs](https://github.com/stackql/stackql-deploy-rs)
 - Server bundles: built by [stackql/stackql `packaging/mcpb`](https://github.com/stackql/stackql/tree/main/packaging/mcpb), published on [stackql/stackql releases](https://github.com/stackql/stackql/releases)
+- Provider registry: [registry.stackql.app](https://registry.stackql.app)
 - Siblings: [rust-embedded-mcp-with-stackql](https://github.com/stackql/rust-embedded-mcp-with-stackql), [dotnet-embedded-mcp-with-stackql](https://github.com/stackql/dotnet-embedded-mcp-with-stackql)
 
 MIT licensed.

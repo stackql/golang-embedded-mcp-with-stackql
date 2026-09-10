@@ -1,11 +1,12 @@
-// Command vendored is the same program as minimal with the server binary
-// compiled straight into the executable: `go generate` fetches the release
-// bundle for this platform once (sha256-verified against the pins the
-// stackql-mcp-go module ships) and writes the go:embed glue; at run time
-// there is no download, no network - one self-contained binary.
+// Command minimal-vendored is the same program as minimal-sidecar with the
+// server binary compiled straight into the executable. Act 3, slide
+// "VENDORED DETAILED". `go generate` fetches the release bundle for this
+// platform once (sha256-verified against the pins the stackql-mcp-go module
+// ships), extracts the server binary and writes the go:embed glue; at run
+// time there is no download, no network - one self-contained binary.
 //
-//	go generate ./cmd/vendored
-//	go build ./cmd/vendored
+//	go generate ./embedded/minimal-vendored
+//	go run ./embedded/minimal-vendored
 package main
 
 import (
@@ -22,7 +23,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "vendored:", err)
+		fmt.Fprintln(os.Stderr, "minimal-vendored:", err)
 		os.Exit(1)
 	}
 }
@@ -30,7 +31,7 @@ func main() {
 func run() error {
 	ctx := context.Background()
 	server, err := stackqlmcp.StartServer(ctx, stackqlmcp.Options{
-		Binary: StackqlMCPBinary(), // <- the only change from minimal
+		Binary: StackqlMCPBinary(), // <- the only change from minimal-sidecar
 		Mode:   stackqlmcp.ModeReadOnly,
 		Auth:   map[string]any{"github": map[string]any{"type": "null_auth"}},
 	})

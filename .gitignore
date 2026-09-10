@@ -2,9 +2,31 @@
 /bin/
 *.exe
 
-# Fetched server binaries + generated go:embed glue for cmd/vendored
-# (go generate ./cmd/vendored re-creates them)
-cmd/vendored/stackql-mcp-*
-cmd/vendored/stackql_mcp_*_gen.go
+# Fetched server binaries + generated go:embed glue for the vendored programs
+# (go generate ./embedded/<program> re-creates them)
+embedded/*/stackql-mcp-*
+embedded/*/stackql_mcp_*_gen.go
+*.mcpb
 
+# Credentials
 .env
+.env.*
+!.env.example
+
+# stackql-deploy / stackql local state
+stackql-deploy.log
+/stacks/**/*.log
+
+# Act 1 output files (primer/exec.sh) and the server log (primer/srv.sh)
+/exposure.jsonl
+/volumes.csv
+/records.psv
+/stackql-srv.log
+
+# stackql local state when run from inside the repo (Windows builds default the approot to cwd)
+.stackql/
+readline
+stackql.log
+
+# Deck exports and reference material kept out of the repo
+/ref/

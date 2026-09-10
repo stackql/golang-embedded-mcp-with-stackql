@@ -1,7 +1,10 @@
-# Build and smoke everything against the published stackql-mcp-go module.
-# Everything except 'agent-live' needs zero credentials (github null_auth).
-# 'agent-live' runs one real one-shot copilot prompt and only when the
-# ANTHROPIC_API_KEY secret is configured.
+# Build and smoke the act-3 programs against the published stackql-mcp-go
+# module, plus the act-1 Go app. Everything except 'agent-live' needs zero
+# credentials: the --check preflights start the embedded server, pull the
+# providers and list the tools without a model call; the github provider
+# runs with null_auth. 'agent-live' asks the audit agent one question that
+# needs no cloud credentials, and only when the ANTHROPIC_API_KEY secret is
+# configured.
 name: ci
 
 on:
@@ -25,18 +28,24 @@ jobs:
         with:
           go-version: '1.25'
       - run: test -z "$(gofmt -l .)"
+      # The vendored programs need their go:embed glue before anything
+      # compiles: go generate fetches and pin-verifies the release bundle.
       - name: vendored glue (go generate fetches + pin-verifies the bundle)
-        run: go generate ./cmd/vendored
+        run: go generate ./embedded/minimal-vendored ./embedded/finops-agent-vendored ./embedded/sandboxctl-vendored
       - run: go vet ./...
       - run: go build ./...
-      - name: minimal (sidecar download, tools, one SELECT, refused write)
-        run: go run ./cmd/minimal
-      - name: vendored (no network at run time)
-        run: go run ./cmd/vendored
-      - name: copilot preflight (no model call)
-        run: go run ./cmd/copilot --check
-      - name: sandboxctl tools (zero credentials)
-        run: go run ./cmd/sandboxctl tools
+      - name: minimal-sidecar (sidecar download, tools, one SELECT, refused write)
+        run: go run ./embedded/minimal-sidecar
+      - name: minimal-vendored (no network at run time)
+        run: go run ./embedded/minimal-vendored
+      - name: audit-agent-sidecar preflight (github null_auth; no model call)
+        run: go run ./embedded/audit-agent-sidecar --check
+      - name: sre-agent-sidecar preflight (pulls aws + cloudflare; no model call)
+        run: go run ./embedded/sre-agent-sidecar --check
+      - name: finops-agent-vendored preflight (vendored extract, pulls aws; no model call)
+        run: go run ./embedded/finops-agent-vendored --check
+      - name: sandboxctl-vendored tools (zero credentials)
+        run: go run ./embedded/sandboxctl-vendored tools
 
   agent-live:
     needs: build-test
@@ -46,7 +55,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
-      - name: one-shot copilot prompt (skips without ANTHROPIC_API_KEY)
+      # Secrets are unavailable in expression context on forks; the guard
+      # below is what actually gates the model call.
+      - name: audit-agent-sidecar, one question (skips without ANTHROPIC_API_KEY)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -54,4 +65,5 @@ jobs:
             echo "ANTHROPIC_API_KEY not configured - skipping the live agent run"
             exit 0
           fi
-          go run ./cmd/copilot -p "How many public repos does the stackql org have? Answer with the number and the SQL you ran."
+          go run ./embedded/audit-agent-sidecar --max-turns 6 \
+            "How many public repos does the stackql org have? Answer with the number and the SQL you ran."

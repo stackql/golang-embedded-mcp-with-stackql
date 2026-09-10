@@ -2,6 +2,10 @@
 // StackQL MCP server: MCP tool definitions become Anthropic tool definitions,
 // tool_use blocks are relayed to the server, and every SQL statement the
 // model runs is echoed to stderr so each step is inspectable.
+//
+// Shared by every agent in embedded/ (act 3). The loop is the same whether
+// the server arrived as a sidecar or vendored; only the server's Options
+// differ, and that is decided in each program's main.go.
 package agentloop
 
 import (
@@ -25,6 +29,7 @@ type Session struct {
 	server   *stackqlmcp.Client
 	model    anthropic.Model
 	tools    []anthropic.ToolUnionParam
+	names    []string
 	messages []anthropic.MessageParam
 }
 
@@ -35,7 +40,10 @@ func New(ctx context.Context, server *stackqlmcp.Client, model string) (*Session
 	if err != nil {
 		return nil, fmt.Errorf("listing MCP tools: %w", err)
 	}
-	var tools []anthropic.ToolUnionParam
+	var (
+		tools []anthropic.ToolUnionParam
+		names []string
+	)
 	for _, t := range listed.Tools {
 		schemaJSON, err := json.Marshal(t.InputSchema)
 		if err != nil {
@@ -56,17 +64,77 @@ func New(ctx context.Context, server *stackqlmcp.Client, model string) (*Session
 				Required:   schema.Required,
 			},
 		}})
+		names = append(names, t.Name)
 	}
 	return &Session{
 		llm:    anthropic.NewClient(), // reads ANTHROPIC_API_KEY
 		server: server,
 		model:  anthropic.Model(model),
 		tools:  tools,
+		names:  names,
 	}, nil
 }
 
 // ToolCount reports how many MCP tools the session exposes to the model.
 func (s *Session) ToolCount() int { return len(s.tools) }
+
+// ToolNames lists the MCP tools the session exposes to the model.
+func (s *Session) ToolNames() []string { return s.names }
+
+// Pull installs providers into the server's local registry cache through the
+// pull_provider tool, so the agent's first query does not pay for it.
+// Idempotent; needs no credentials.
+func Pull(ctx context.Context, server *stackqlmcp.Client, providers ...string) error {
+	for _, p := range providers {
+		res, err := server.Session.CallTool(ctx, &mcp.CallToolParams{
+			Name: "pull_provider", Arguments: map[string]any{"provider": p},
+		})
+		if err != nil {
+			return fmt.Errorf("pulling provider %s: %w", p, err)
+		}
+		if res.IsError {
+			return fmt.Errorf("pulling provider %s: %s", p, FirstLine(toolResultText(res)))
+		}
+	}
+	return nil
+}
+
+// Render fills `{{ NAME }}` placeholders in a prompt from lookup. A
+// placeholder with no value is an error, not a blank: a sweep with an empty
+// region or zone id would send the agent off guessing.
+func Render(template string, lookup func(name string) string) (string, error) {
+	var (
+		out     strings.Builder
+		missing []string
+		rest    = template
+	)
+	for {
+		start := strings.Index(rest, "{{")
+		if start < 0 {
+			break
+		}
+		out.WriteString(rest[:start])
+		after := rest[start+2:]
+		end := strings.Index(after, "}}")
+		if end < 0 {
+			out.WriteString(rest[start:])
+			rest = ""
+			break
+		}
+		name := strings.TrimSpace(after[:end])
+		if v := lookup(name); v != "" {
+			out.WriteString(v)
+		} else {
+			missing = append(missing, name)
+		}
+		rest = after[end+2:]
+	}
+	out.WriteString(rest)
+	if len(missing) > 0 {
+		return "", fmt.Errorf("prompts/task.md needs these set in the environment (.env): %s", strings.Join(missing, ", "))
+	}
+	return out.String(), nil
+}
 
 // Ask appends the user message, runs the agent loop until the model stops
 // calling tools, and returns the model's final text.

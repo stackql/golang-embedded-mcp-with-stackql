@@ -1,8 +1,11 @@
-// Command minimal is the smallest embedding. Start the embedded StackQL MCP
-// server read-only, list its tools, run one SELECT over the github provider
-// with no credentials, prove writes are refused, shut down. First run
-// downloads and sha256-verifies the pinned server bundle; after that it is
-// offline.
+// Command minimal-sidecar is the smallest embedding, sidecar acquisition.
+// Act 3, slide "SIDECAR DETAILED". Start the embedded StackQL MCP server
+// read-only, list its tools, run one SELECT over the github provider with no
+// credentials, prove writes are refused, shut down. First run downloads and
+// sha256-verifies the pinned server bundle into ~/.stackql/mcp-server-bin;
+// after that it is offline.
+//
+//	go run ./embedded/minimal-sidecar
 package main
 
 import (
@@ -17,7 +20,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "minimal:", err)
+		fmt.Fprintln(os.Stderr, "minimal-sidecar:", err)
 		os.Exit(1)
 	}
 }

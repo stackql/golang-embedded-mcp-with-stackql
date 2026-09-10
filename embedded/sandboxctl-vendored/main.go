@@ -1,6 +1,8 @@
-// Command sandboxctl is an on-demand infrastructure concierge: an embedded
-// stackql MCP server (acquired and sha256-verified on first run) wired to a
-// Claude agent loop.
+// Command sandboxctl-vendored is an on-demand infrastructure concierge: an
+// embedded stackql MCP server, vendored straight into this executable, wired
+// to a Claude agent loop. Act 3, the reference app: mode escalation as a
+// workflow, and the single-binary distribution story (`go generate` once,
+// then one file that starts with no network).
 //
 // Developers ask for ephemeral cloud sandboxes in plain language; the
 // agent plans, prices, provisions, and labels everything with an expiry so
@@ -8,9 +10,10 @@
 // plan and cost estimate pass an explicit approval gate, and every SQL
 // statement the agent runs is printed.
 //
-//	sandboxctl request "a small linux vm and a bucket in sydney for 2 days" --project my-gcp-project
-//	sandboxctl reap --project my-gcp-project
-//	sandboxctl tools
+//	go generate ./embedded/sandboxctl-vendored
+//	go run ./embedded/sandboxctl-vendored request "a small linux vm and a bucket in sydney for 2 days" --project my-gcp-project
+//	go run ./embedded/sandboxctl-vendored reap --project my-gcp-project
+//	go run ./embedded/sandboxctl-vendored tools
 //
 // Requires ANTHROPIC_API_KEY (request/reap) and GOOGLE_CREDENTIALS (a GCP
 // service account key JSON, stackql's default google auth) in the
@@ -23,14 +26,26 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/stackql/golang-embedded-mcp-with-stackql/internal/agentloop"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stackql/golang-embedded-mcp-with-stackql/embedded/internal/agentloop"
 	stackqlmcp "github.com/stackql/stackql-mcp-go/embed"
 )
 
+// The server binary for this platform, fetched once at build time. The
+// generated stackql_mcp_<platform>_gen.go (gitignored) carries it with
+// go:embed and exposes StackqlMCPBinary().
+//
+//go:generate go run github.com/stackql/stackql-mcp-go/cmd/stackql-mcp-fetch -platform auto -package main
+
 const defaultModel = "claude-sonnet-5"
+
+// approvalHandler answers an elicitation/create request from the server;
+// it is the type of go-sdk's ClientOptions.ElicitationHandler.
+type approvalHandler = func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -78,12 +93,64 @@ func model(flagValue string) string {
 	return defaultModel
 }
 
-// startServer spawns the embedded stackql MCP server in the given mode.
-func startServer(ctx context.Context, mode stackqlmcp.Mode) (*stackqlmcp.Client, error) {
-	fmt.Fprintf(os.Stderr, "starting embedded stackql mcp server (mode=%s)\n", mode)
-	return stackqlmcp.StartServer(ctx, stackqlmcp.Options{
-		Mode: mode,
-	})
+// startServer spawns the embedded stackql MCP server in the given mode. The
+// server binary is vendored: extracted from this executable into the shared
+// cache on first run, no download.
+//
+// The write modes are a server-side contract: in safe the server asks the
+// client for approval before every mutation, in delete_safe before every
+// DELETE, over MCP elicitation, and refuses a client that cannot answer.
+// approvals is the handler that answers; nil is fine for read_only.
+// StartServer does not expose client options, so for the write phases the
+// module's CommandLine (the same acquisition and launch arguments) feeds a
+// go-sdk client built here with the handler attached.
+func startServer(ctx context.Context, mode stackqlmcp.Mode, approvals approvalHandler) (*stackqlmcp.Client, error) {
+	fmt.Fprintf(os.Stderr, "starting embedded stackql mcp server (vendored, mode=%s)\n", mode)
+	opts := stackqlmcp.Options{
+		Binary: StackqlMCPBinary(),
+		Mode:   mode,
+	}
+	if approvals == nil {
+		return stackqlmcp.StartServer(ctx, opts)
+	}
+	path, args, err := stackqlmcp.CommandLine(opts)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Stderr = os.Stderr
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "sandboxctl", Version: "0.1.0"},
+		&mcp.ClientOptions{ElicitationHandler: approvals}, // advertises the elicitation capability
+	)
+	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to the embedded server: %w", err)
+	}
+	return &stackqlmcp.Client{Session: session, BinaryPath: path, Mode: mode}, nil
+}
+
+// approver answers the server's per-statement approval requests. The plan was
+// approved as a whole at the gate; the server still shows each gated
+// statement and waits for a y at the terminal, unless --approve pre-approved
+// the run (cron, CI). Declining makes the server refuse that one statement.
+func approver(preApproved bool) approvalHandler {
+	return func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+		fmt.Fprintf(os.Stderr, "\n  [approval requested by the server]\n  %s\n",
+			strings.ReplaceAll(strings.TrimSpace(req.Params.Message), "\n", "\n  "))
+		if preApproved {
+			fmt.Fprintln(os.Stderr, "  -> accepted (--approve)")
+			return &mcp.ElicitResult{Action: "accept", Content: map[string]any{}}, nil
+		}
+		ok, err := confirm(false, "  approve this statement?")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		}
+		return &mcp.ElicitResult{Action: "accept", Content: map[string]any{}}, nil
+	}
 }
 
 func checkEnv(needAnthropic bool) error {
@@ -145,7 +212,7 @@ func cmdRequest(argv []string) error {
 
 	// Phase 1: plan and price with a read_only server. The agent cannot
 	// create anything here even if it tries.
-	planServer, err := startServer(ctx, stackqlmcp.ModeReadOnly)
+	planServer, err := startServer(ctx, stackqlmcp.ModeReadOnly, nil)
 	if err != nil {
 		return err
 	}
@@ -171,8 +238,9 @@ func cmdRequest(argv []string) error {
 		return nil
 	}
 
-	// Phase 2: provision with a fresh server in safe mode.
-	provServer, err := startServer(ctx, stackqlmcp.ModeSafe)
+	// Phase 2: provision with a fresh server in safe mode. The server asks
+	// for approval before each INSERT; approver answers at the terminal.
+	provServer, err := startServer(ctx, stackqlmcp.ModeSafe, approver(*approve))
 	if err != nil {
 		return err
 	}
@@ -208,7 +276,7 @@ func cmdReap(argv []string) error {
 	now := time.Now().UTC()
 
 	// Phase 1: find expired sandboxes with a read_only server.
-	findServer, err := startServer(ctx, stackqlmcp.ModeReadOnly)
+	findServer, err := startServer(ctx, stackqlmcp.ModeReadOnly, nil)
 	if err != nil {
 		return err
 	}
@@ -238,8 +306,9 @@ func cmdReap(argv []string) error {
 		return nil
 	}
 
-	// Phase 2: tear down with delete_safe.
-	reapServer, err := startServer(ctx, stackqlmcp.ModeDeleteSafe)
+	// Phase 2: tear down with delete_safe. The server asks for approval
+	// before each DELETE; approver answers at the terminal.
+	reapServer, err := startServer(ctx, stackqlmcp.ModeDeleteSafe, approver(*approve))
 	if err != nil {
 		return err
 	}
@@ -266,7 +335,7 @@ func cmdTools(argv []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	server, err := startServer(ctx, stackqlmcp.ModeReadOnly)
+	server, err := startServer(ctx, stackqlmcp.ModeReadOnly, nil)
 	if err != nil {
 		return err
 	}

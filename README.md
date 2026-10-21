@@ -12,7 +12,7 @@ The [`stackql-mcp-go`](https://pkg.go.dev/github.com/stackql/stackql-mcp-go/embe
 |---|---|---|---|
 | 1 | [primer/](primer/) | StackQL itself: `stackql shell`, `stackql exec`, `stackql srv` with `psql` and a Go app over the Postgres wire protocol (pgx) | `stackql` on PATH; AWS + Cloudflare for most blocks, none for the GitHub ones and the Go app |
 | 2 | [stacks/](stacks/) | `stackql-deploy`: a service's footprint across AWS and Cloudflare converged as data, a drift script, and a zero-credential GitHub variant | `stackql-deploy` on PATH; AWS + Cloudflare (or a GitHub token) |
-| 3 | [embedded/](embedded/) | Embedded MCP in Go: the smallest sidecar and vendored embeddings, three agents, and the reference app | Go 1.25+; `ANTHROPIC_API_KEY` for the agents |
+| 3 | [embedded/](embedded/) | Embedded MCP in Go: the smallest sidecar and vendored embeddings, three agents, and the reference app | Go 1.27.3+ (the toolchain line in go.mod fetches it for an older Go); `ANTHROPIC_API_KEY` for the agents |
 
 Phase 3, the programs (the suffix is how the server arrives):
 

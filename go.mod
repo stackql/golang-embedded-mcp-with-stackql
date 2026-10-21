@@ -2,6 +2,8 @@ module github.com/stackql/golang-embedded-mcp-with-stackql
 
 go 1.25.0
 
+toolchain go1.27.3
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.1
 	github.com/jackc/pgx/v5 v5.10.0
